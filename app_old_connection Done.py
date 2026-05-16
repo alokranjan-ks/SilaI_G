@@ -1,9 +1,11 @@
 import os
 import json
+import io
 from flask import Flask, redirect, url_for, session, request, render_template_string
 from werkzeug.middleware.proxy_fix import ProxyFix
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
 from google.oauth2.credentials import Credentials
 
 app = Flask(__name__)
@@ -80,17 +82,59 @@ HTML_TEMPLATE = '''
 def home():
     logged_in = 'credentials' in session
     results = None
-    vault_status = None
+    vault_status = "Connected to Google Drive. Secure session active."
 
-    if logged_in:
-        vault_status = "Connected to Google Drive. Secure session active."
-        if request.method == 'POST':
-            question = request.form.get('question')
-            results = {
-                "gemini": f"Gemini is primed with your session token. Ready to process: <em>{question}</em>",
-                "claude": f"Claude is primed with your session token. Ready to process: <em>{question}</em>",
-                "grok": f"Grok is primed with your session token. Ready to process: <em>{question}</em>"
-            }
+    if logged_in and request.method == 'POST':
+        question = request.form.get('question')
+        
+        try:
+            # Re-assemble authorized credentials for this specific login session
+            creds = Credentials(**session['credentials'])
+            drive_service = build('drive', 'v3', credentials=creds)
+            
+            # Locate the vault.json file across the Drive storage layers
+            drive_results = drive_service.files().list(
+                q="name = 'vault.json' and trashed = false",
+                fields="files(id, name)"
+            ).execute()
+            items = drive_results.get('files', [])
+            
+            if not items:
+                vault_status = "Error: vault.json file could not be located in your Google Drive."
+                results = {
+                    "gemini": "Unable to read keys.",
+                    "claude": "Unable to read keys.",
+                    "grok": "Unable to read keys."
+                }
+            else:
+                # Target the file ID and stream its binary footprint into memory
+                file_id = items[0]['id']
+                drive_request = drive_service.files().get_media(fileId=file_id)
+                fh = io.BytesIO()
+                downloader = MediaIoBaseDownload(fh, drive_request)
+                done = False
+                while not done:
+                    status, done = downloader.next_chunk()
+                
+                # Unbox and decode the parsed structure
+                vault_content = json.loads(fh.getvalue().decode('utf-8'))
+                keys = vault_content.get("keys", {})
+                
+                # Confirm presence of keys inside the specific layout keys structure
+                gemini_key = "Loaded Successfully ✔" if keys.get("gemini", {}).get("PSID") else "Missing ✘"
+                claude_key = "Loaded Successfully ✔" if keys.get("claude", {}).get("sessionKey") else "Missing ✘"
+                grok_key = "Loaded Successfully ✔" if keys.get("grok", {}).get("sso") else "Missing ✘"
+                
+                vault_status = "Connected to Google Drive. Secure session active. vault.json read complete."
+                results = {
+                    "gemini": f"<strong>Token State:</strong> {gemini_key}<br><br>Vault data parsed. Ready to connect browser engine pipeline for query: <em>{question}</em>",
+                    "claude": f"<strong>Token State:</strong> {claude_key}<br><br>Vault data parsed. Ready to connect browser engine pipeline for query: <em>{question}</em>",
+                    "grok": f"<strong>Token State:</strong> {grok_key}<br><br>Vault data parsed. Ready to connect browser engine pipeline for query: <em>{question}</em>"
+                }
+                
+        except Exception as e:
+            vault_status = f"Error reading Vault database: {str(e)}"
+            results = {"gemini": "Error", "claude": "Error", "grok": "Error"}
 
     return render_template_string(HTML_TEMPLATE, logged_in=logged_in, results=results, vault_status=vault_status)
 
@@ -103,7 +147,7 @@ def login():
     )
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     session['state'] = state
-    session['code_verifier'] = flow.code_verifier  # Explicitly preserve the verification code
+    session['code_verifier'] = flow.code_verifier
     return redirect(authorization_url)
 
 @app.route('/callback')
@@ -114,7 +158,6 @@ def callback():
         state=session.get('state'),
         redirect_uri=f"{request.url_root.rstrip('/')}/callback"
     )
-    # Complete the handshake protocol using the preserved verification credentials
     flow.fetch_token(
         authorization_response=request.url,
         code_verifier=session.get('code_verifier')
@@ -128,7 +171,6 @@ def callback():
         'client_secret': credentials.client_secret,
         'scopes': credentials.scopes
     }
-    # Clean up the single-use verification state from memory
     session.pop('code_verifier', None)
     return redirect(url_for('home'))
 
