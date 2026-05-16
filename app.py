@@ -103,6 +103,7 @@ def login():
     )
     authorization_url, state = flow.authorization_url(access_type='offline', include_granted_scopes='true')
     session['state'] = state
+    session['code_verifier'] = flow.code_verifier  # Explicitly preserve the verification code
     return redirect(authorization_url)
 
 @app.route('/callback')
@@ -113,7 +114,11 @@ def callback():
         state=session.get('state'),
         redirect_uri=f"{request.url_root.rstrip('/')}/callback"
     )
-    flow.fetch_token(authorization_response=request.url)
+    # Complete the handshake protocol using the preserved verification credentials
+    flow.fetch_token(
+        authorization_response=request.url,
+        code_verifier=session.get('code_verifier')
+    )
     credentials = flow.credentials
     session['credentials'] = {
         'token': credentials.token,
@@ -123,6 +128,8 @@ def callback():
         'client_secret': credentials.client_secret,
         'scopes': credentials.scopes
     }
+    # Clean up the single-use verification state from memory
+    session.pop('code_verifier', None)
     return redirect(url_for('home'))
 
 if __name__ == '__main__':
