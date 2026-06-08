@@ -72,5 +72,8 @@ if BOT_TOKEN and CHAT_ID:
         requests.post(url, json=payload)
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
+
+while True:
+    time.sleep(60)
 else:
     print("Skipping Telegram alert: BOT_TOKEN or CHAT_ID environment variables are missing.")
