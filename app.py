@@ -4,25 +4,53 @@ import gradio as gr
 import requests
 import time
 import os
+import gc
 
 # --- 1. CONFIGURATION ---
-# Fetching Telegram Bot details from environment secrets
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
-MODEL_ID = "John6666/wai-nsfw-illustrious-v80-sdxl"
+
+# Define your model library here
+MODELS = {
+    "Illustrious (Anime/NSFW)": "John6666/wai-nsfw-illustrious-v80-sdxl",
+    "Juggernaut XL v9 (Photorealistic)": "RunDiffusion/Juggernaut-XL-v9",
+    "RealVisXL V4.0 (Photorealistic)": "SG161222/RealVisXL_V4.0"
+}
 
 # --- 2. ENGINE SETUP ---
-print("Loading Uncensored Engine to GPU...")
-pipe = StableDiffusionXLPipeline.from_pretrained(
-    MODEL_ID,
-    torch_dtype=torch.float16,
-    safety_checker=None, # The Uncensored Override
-    requires_safety_checker=False
-)
-pipe = pipe.to("cuda")
-pipe.enable_attention_slicing() # Prevents memory crashes on free T4 GPUs
+current_model_name = "Illustrious (Anime/NSFW)"
+pipe = None
 
-def generate_image(prompt, negative_prompt, steps, guidance):
+def load_pipeline(model_id):
+    global pipe
+    # Clear VRAM before loading a new model to prevent Out-Of-Memory crashes
+    if pipe is not None:
+        del pipe
+        gc.collect()
+        torch.cuda.empty_cache()
+    
+    print(f"Loading {model_id} to GPU...")
+    pipe = StableDiffusionXLPipeline.from_pretrained(
+        model_id,
+        torch_dtype=torch.float16,
+        safety_checker=None, 
+        requires_safety_checker=False
+    )
+    pipe = pipe.to("cuda")
+    pipe.enable_attention_slicing()
+
+# Initial startup load
+load_pipeline(MODELS[current_model_name])
+
+def generate_image(model_choice, prompt, negative_prompt, steps, guidance):
+    global current_model_name, pipe
+    
+    # Check if the user selected a different model from the dropdown
+    if model_choice != current_model_name:
+        print(f"Switching model from {current_model_name} to {model_choice}...")
+        load_pipeline(MODELS[model_choice])
+        current_model_name = model_choice
+        
     print("Generating artwork...")
     image = pipe(
         prompt=prompt,
@@ -38,6 +66,11 @@ with gr.Blocks(title="Sila's Private Studio") as demo:
     
     with gr.Row():
         with gr.Column():
+            model_dropdown = gr.Dropdown(
+                choices=list(MODELS.keys()), 
+                value=current_model_name, 
+                label="Select Engine"
+            )
             prompt = gr.Textbox(label="Prompt", lines=4)
             negative = gr.Textbox(label="Negative Prompt", value="blurry, low quality, censored, deformed", lines=2)
             steps = gr.Slider(minimum=10, maximum=50, value=30, step=1, label="Steps")
@@ -47,16 +80,19 @@ with gr.Blocks(title="Sila's Private Studio") as demo:
         with gr.Column():
             output_image = gr.Image(label="Generated Art")
             
-    btn.click(fn=generate_image, inputs=[prompt, negative, steps, guidance], outputs=output_image)
+    # Added model_dropdown to the inputs array
+    btn.click(
+        fn=generate_image, 
+        inputs=[model_dropdown, prompt, negative, steps, guidance], 
+        outputs=output_image
+    )
 
 # --- 4. TELEGRAM DELIVERY SYSTEM ---
 print("Waking up Sila Studio...")
 
-# Launch in the background so we can grab the URL
 demo.launch(share=True, prevent_thread_lock=True)
 public_url = demo.share_url
 
-# Fire off Telegram message if secrets are available
 if BOT_TOKEN and CHAT_ID:
     message = (
         "🎨 **Sila Image Studio is Awake!**\n\n"
@@ -72,8 +108,8 @@ if BOT_TOKEN and CHAT_ID:
         requests.post(url, json=payload)
     except Exception as e:
         print(f"Failed to send Telegram message: {e}")
+else:
+    print("Skipping Telegram alert: BOT_TOKEN or CHAT_ID environment variables are missing.")
 
 while True:
     time.sleep(60)
-else:
-    print("Skipping Telegram alert: BOT_TOKEN or CHAT_ID environment variables are missing.")
